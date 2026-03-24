@@ -1,0 +1,9 @@
+[project]
+name = "pipecat-repro-issue"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "pipecat-ai-flows>=0.0.22",
+    "pipecat-ai[azure,daily,deepgram,google,openai,runner,webrtc]==0.0.106",]
