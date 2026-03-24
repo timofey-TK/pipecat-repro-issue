@@ -1,0 +1,186 @@
+# Pipecat Repro Note: Assistant Context Missing Final TTS Chunk After `send-text`
+
+## Correction / Apology
+
+Sorry, my previous report was incomplete.
+
+At first I thought this was a general voice/TTS context-ordering issue, but after more testing I realized the important condition is **how the user sends the next turn**:
+
+- the problem reproduces when the next user turn is sent through the **text input field** in the Pipecat Playground / RTVI client (`send-text`)
+- I was **not** able to reproduce the same immediate truncation when replying by **voice**
+
+So the key condition is not just the Pipecat version. It is specifically the **text-input path**.
+
+## What I Am Sending
+
+I am attaching:
+
+- this note
+- `test.py` as a minimal runnable example
+- logs from a failing **text-input** run
+- logs from a **voice-input** comparison run
+
+## Short Description
+
+The assistant speaks the full reply out loud, but when the user answers through the client text field, the **next LLM request** may receive an incomplete `assistant` message in context.
+
+The missing final sentence is not permanently lost. It can appear later in a subsequent LLM request, which suggests the assistant context is being committed too early relative to the final TTS text chunk.
+
+## Minimal Reproduction
+
+Use the attached `test.py` and smallwebrtc transport
+
+### Environment
+
+The script expects these environment variables:
+
+- `DEEPGRAM_API_KEY`
+- `OPENAI_API_KEY`
+- `VERTEX_JSON`
+- `VERTEX_LOCATION`
+
+### Important Repro Condition
+
+Please reproduce using the **text box** in the UI, not the microphone.
+
+In the failing path, the client sends:
+
+```text
+{'label': 'rtvi-ai', 'type': 'send-text', 'data': {'content': 'hello', 'options': {}}}
+```
+
+### Repro Steps
+
+1. Start the bot with `uv run test.py`.
+2. Open the Pipecat Playground / RTVI client.
+3. Let the bot finish its greeting.
+4. Reply using the **text field** with a short message such as `hello`.
+5. Inspect the next `OpenAILLMService ... Generating chat from universal context ...` log line.
+
+## Expected Result
+
+If the bot speaks a multi-part reply such as:
+
+1. `Hey there!`
+2. `Nice to meet you ...`
+3. `What's on your mind today?`
+
+then the next LLM request should include the **entire spoken assistant turn** in the conversation context.
+
+## Actual Result
+
+The user hears the full spoken reply, but the next LLM request only contains the earlier part of the assistant turn.
+
+In my text-input logs, the next context is:
+
+```python
+[
+    {
+        "role": "system",
+        "content": "Greet the user in English in 3-4 sentences. Start the conversation in a friendly way.",
+    },
+    {
+        "role": "assistant",
+        "content": "Hey there! Nice to meet you 😊 I’m here to help with anything you’re curious about—questions, ideas, or just a bit of conversation.",
+    },
+    {
+        "role": "user",
+        "content": "hello",
+    },
+]
+```
+
+The final spoken sentence:
+
+- `What's on your mind today?`
+
+is missing from that next-turn LLM context, even though it was spoken to the user.
+
+## Why I Think The Text Path Matters
+
+In the failing case, the relevant sequence is:
+
+1. the bot finishes speaking a multi-chunk TTS response
+2. the client sends a text message through `send-text`
+3. `RTVIProcessor` broadcasts interruption
+4. the next LLM call is created with incomplete assistant context
+
+In the comparison voice run, the user turn goes through STT / VAD / `LLMUserAggregator`, and the missing-final-sentence symptom does not show up the same way.
+
+So this may be a difference between:
+
+- the **RTVI text-input path** (`send-text`)
+- and the **voice/STT turn path**
+
+## Attached Text-Input Evidence
+
+the failing logs:
+
+```text
+2026-03-24 09:52:50.530 | DEBUG    | pipecat.transports.smallwebrtc.transport:push_app_message:694 - Received app message inside SmallWebRTCInputTransport  {'label': 'rtvi-ai', 'type': 'client-ready', 'data': {'version': '1.2.0', 'about': {'library': '@pipecat-ai/client-react', 'library_version': '1.2.0', 'platform_details': {'browser': 'Firefox', 'browser_version': '148.0', 'platform_type': 'desktop', 'engine': 'Gecko'}, 'platform': 'Windows', 'platform_version': 'NT 10.0'}}, 'id': '2533fa65'}
+2026-03-24 09:52:50.546 | DEBUG    | pipecat.processors.frameworks.rtvi.processor:_handle_client_ready:408 - Received client-ready: version 1.2.0
+2026-03-24 09:52:50.546 | DEBUG    | pipecat.processors.frameworks.rtvi.processor:_handle_client_ready:415 - Client Details: library='@pipecat-ai/client-react' library_version='1.2.0' platform='Windows' platform_version='NT 10.0' platform_details={'browser': 'Firefox', 'browser_version': '148.0', 'platform_type': 'desktop', 'engine': 'Gecko'}
+2026-03-24 09:52:52.215 | DEBUG    | pipecat.services.deepgram.stt:_connection_handler:676 - DeepgramSTTService#0: Websocket connection initialized
+2026-03-24 09:52:52.225 | DEBUG    | pipecat.services.google.tts:run_tts:1424 - GeminiTTSService#0: Generating TTS [Hey there!]
+2026-03-24 09:52:54.234 | DEBUG    | pipecat.services.tts_service:push_frame:808 - GeminiTTSService#0 cleaning up TTS context 6c9bea9b-5c9b-4a9f-92b6-ab4f42d0a13a
+2026-03-24 09:52:54.789 | DEBUG    | pipecat.transports.base_output:_bot_started_speaking:627 - Bot started speaking
+2026-03-24 09:52:55.128 | DEBUG    | pipecat.services.google.tts:run_tts:1424 - GeminiTTSService#0: Generating TTS [Nice to meet you 😊 I’m here to help with anything you’re curious about—questions, ideas, or just a bit of conversation.]
+2026-03-24 09:53:02.936 | DEBUG    | pipecat.services.google.tts:run_tts:1424 - GeminiTTSService#0: Generating TTS [What’s on your mind today?]
+2026-03-24 09:53:05.596 | DEBUG    | pipecat.services.tts_service:push_frame:808 - GeminiTTSService#0 cleaning up TTS context 6c9bea9b-5c9b-4a9f-92b6-ab4f42d0a13a
+2026-03-24 09:53:09.354 | DEBUG    | pipecat.transports.base_output:_handle_frame:721 - Bot stopped speaking based on TTSStoppedFrame
+2026-03-24 09:53:09.354 | DEBUG    | pipecat.transports.base_output:_bot_stopped_speaking:655 - Bot stopped speaking
+2026-03-24 09:53:10.058 | DEBUG    | pipecat.transports.smallwebrtc.transport:push_app_message:694 - Received app message inside SmallWebRTCInputTransport  {'label': 'rtvi-ai', 'type': 'send-text', 'data': {'content': 'hello', 'options': {}}, 'id': '2e972c02'}
+2026-03-24 09:53:10.059 | DEBUG    | pipecat.processors.frame_processor:broadcast_interruption:765 - RTVIProcessor#0: broadcasting interruption
+2026-03-24 09:53:10.066 | DEBUG    | pipecat.services.openai.base_llm:_stream_chat_completions_universal_context:438 - OpenAILLMService#0: Generating chat from universal context [{'role': 'system', 'content': 'Greet the user in English in 3-4 sentences. Start the conversation in a friendly way.'}, {'role': 'assistant', 'content': 'Hey there! Nice to meet you 😊 I’m here to help with anything you’re curious about—questions, ideas, or just a bit of conversation.'}, {'role': 'user', 'content': 'hello'}]
+2026-03-24 09:53:10.066 | DEBUG    | pipecat.adapters.base_llm_adapter:from_standard_tools:127 - Retrieving the tools using the adapter: <class 'pipecat.adapters.services.open_ai_adapter.OpenAILLMAdapter'>
+2026-03-24 09:53:11.101 | DEBUG    | pipecat.services.google.tts:run_tts:1424 - GeminiTTSService#0: Generating TTS [Hey!]
+2026-03-24 09:53:13.104 | DEBUG    | pipecat.services.tts_service:push_frame:808 - GeminiTTSService#0 cleaning up TTS context 7ac597e3-3a8f-461e-854b-b61dbcad57e1
+2026-03-24 09:53:13.186 | DEBUG    | pipecat.transports.base_output:_bot_started_speaking:627 - Bot started speaking
+2026-03-24 09:53:13.524 | DEBUG    | pipecat.services.google.tts:run_tts:1424 - GeminiTTSService#0: Generating TTS [👋 How’s it going?]
+2026-03-24 09:53:16.567 | DEBUG    | pipecat.services.google.tts:run_tts:1424 - GeminiTTSService#0: Generating TTS [What’s on your mind today?]
+2026-03-24 09:53:19.146 | DEBUG    | pipecat.services.tts_service:push_frame:808 - GeminiTTSService#0 cleaning up TTS context 7ac597e3-3a8f-461e-854b-b61dbcad57e1
+2026-03-24 09:53:20.504 | DEBUG    | pipecat.transports.base_output:_handle_frame:721 - Bot stopped speaking based on TTSStoppedFrame
+2026-03-24 09:53:20.505 | DEBUG    | pipecat.transports.base_output:_bot_stopped_speaking:655 - Bot stopped speaking
+```
+
+## Voice Comparison
+
+the comparison voice logs:
+
+```text
+  2026-03-24 09:57:56.639 | DEBUG    | pipecat.services.openai.base_llm:_stream_chat_completions_universal_context:438 - OpenAILLMService#1: Generating chat from universal context [{'role': 'system', 'content': 'Greet the user in English in 3-4 sentences. Start the conversation in a friendly way.'}]
+2026-03-24 09:57:56.639 | DEBUG    | pipecat.adapters.base_llm_adapter:from_standard_tools:127 - Retrieving the tools using the adapter: <class 'pipecat.adapters.services.open_ai_adapter.OpenAILLMAdapter'>
+2026-03-24 09:57:56.646 | DEBUG    | pipecat.transports.smallwebrtc.transport:push_app_message:694 - Received app message inside SmallWebRTCInputTransport  {'label': 'rtvi-ai', 'type': 'client-ready', 'data': {'version': '1.2.0', 'about': {'library': '@pipecat-ai/client-react', 'library_version': '1.2.0', 'platform_details': {'browser': 'Firefox', 'browser_version': '148.0', 'platform_type': 'desktop', 'engine': 'Gecko'}, 'platform': 'Windows', 'platform_version': 'NT 10.0'}}, 'id': 'ccf37715'}
+2026-03-24 09:57:56.648 | DEBUG    | pipecat.processors.frameworks.rtvi.processor:_handle_client_ready:408 - Received client-ready: version 1.2.0
+2026-03-24 09:57:56.648 | DEBUG    | pipecat.processors.frameworks.rtvi.processor:_handle_client_ready:415 - Client Details: library='@pipecat-ai/client-react' library_version='1.2.0' platform='Windows' platform_version='NT 10.0' platform_details={'browser': 'Firefox', 'browser_version': '148.0', 'platform_type': 'desktop', 'engine': 'Gecko'}
+2026-03-24 09:57:56.969 | DEBUG    | pipecat.services.deepgram.stt:_connection_handler:676 - DeepgramSTTService#1: Websocket connection initialized
+2026-03-24 09:57:57.892 | DEBUG    | pipecat.services.google.tts:run_tts:1424 - GeminiTTSService#1: Generating TTS [Hey there!]
+2026-03-24 09:57:59.895 | DEBUG    | pipecat.services.tts_service:push_frame:808 - GeminiTTSService#1 cleaning up TTS context 14b6d090-736d-4a60-a810-84fe80fafff2
+2026-03-24 09:58:00.746 | DEBUG    | pipecat.transports.base_output:_bot_started_speaking:627 - Bot started speaking
+2026-03-24 09:58:01.039 | DEBUG    | pipecat.services.google.tts:run_tts:1424 - GeminiTTSService#1: Generating TTS [😊 Nice to meet you—how’s your day going so far?]
+2026-03-24 09:58:05.472 | DEBUG    | pipecat.services.google.tts:run_tts:1424 - GeminiTTSService#1: Generating TTS [I’m here to help with anything you need, whether it’s a quick question or something more involved.]
+2026-03-24 09:58:12.670 | DEBUG    | pipecat.services.tts_service:append_to_audio_context:1226 - GeminiTTSService#1 recreating audio context 14b6d090-736d-4a60-a810-84fe80fafff2
+2026-03-24 09:58:12.720 | DEBUG    | pipecat.services.google.tts:run_tts:1424 - GeminiTTSService#1: Generating TTS [Feel free to jump right in!]
+2026-03-24 09:58:18.021 | DEBUG    | pipecat.transports.base_output:_bot_stopped_speaking:655 - Bot stopped speaking
+2026-03-24 09:58:18.484 | DEBUG    | pipecat.services.tts_service:append_to_audio_context:1226 - GeminiTTSService#1 recreating audio context 14b6d090-736d-4a60-a810-84fe80fafff2
+2026-03-24 09:58:18.485 | DEBUG    | pipecat.transports.base_output:_bot_started_speaking:627 - Bot started speaking
+2026-03-24 09:58:18.526 | DEBUG    | pipecat.services.tts_service:push_frame:808 - GeminiTTSService#1 cleaning up TTS context 14b6d090-736d-4a60-a810-84fe80fafff2
+2026-03-24 09:58:20.723 | DEBUG    | pipecat.transports.base_output:_handle_frame:721 - Bot stopped speaking based on TTSStoppedFrame
+2026-03-24 09:58:20.723 | DEBUG    | pipecat.transports.base_output:_bot_stopped_speaking:655 - Bot stopped speaking
+2026-03-24 09:58:23.181 | DEBUG    | pipecat.processors.aggregators.llm_response_universal:_on_user_turn_started:725 - LLMUserAggregator#1: User started speaking (strategy: VADUserTurnStartStrategy#1)
+2026-03-24 09:58:23.181 | DEBUG    | pipecat.processors.frame_processor:broadcast_interruption:765 - LLMUserAggregator#1: broadcasting interruption
+2026-03-24 09:58:24.853 | DEBUG    | pipecat.audio.turn.smart_turn.base_smart_turn:analyze_end_of_turn:162 - End of Turn result: EndOfTurnState.COMPLETE
+2026-03-24 09:58:30.071 | DEBUG    | pipecat.processors.aggregators.llm_response_universal:_on_user_turn_stopped:745 - LLMUserAggregator#1: User stopped speaking (strategy: None)
+2026-03-24 09:58:30.073 | DEBUG    | pipecat.services.openai.base_llm:_stream_chat_completions_universal_context:438 - OpenAILLMService#1: Generating chat from universal context [{'role': 'system', 'content': 'Greet the user in English in 3-4 sentences. Start the conversation in a friendly way.'}, {'role': 'assistant', 'content': 'Hey there! 😊 Nice to meet you—how’s your day going so far? I’m here to help with anything you need, whether it’s a quick question or something more involved.'}, {'role': 'assistant', 'content': 'Feel free to jump right in!'}, {'role': 'user', 'content': 'Hello. Tell me more about yourself.'}]
+2026-03-24 09:58:30.073 | DEBUG    | pipecat.adapters.base_llm_adapter:from_standard_tools:127 - Retrieving the tools using the adapter: <class 'pipecat.adapters.services.open_ai_adapter.OpenAILLMAdapter'>
+2026-03-24 09:58:30.804 | DEBUG    | pipecat.services.google.tts:run_tts:1424 - GeminiTTSService#1: Generating TTS [Hi!]
+2026-03-24 09:58:32.755 | DEBUG    | pipecat.transports.base_output:_bot_started_speaking:627 - Bot started speaking
+2026-03-24 09:58:32.976 | DEBUG    | pipecat.services.google.tts:run_tts:1424 - GeminiTTSService#1: Generating TTS [I’m ChatGPT, an AI created by OpenAI.]
+2026-03-24 09:58:34.978 | DEBUG    | pipecat.services.tts_service:push_frame:808 - GeminiTTSService#1 cleaning up TTS context c969a761-6873-4f3f-a76c-aca3b5e1299f
+2026-03-24 09:58:34.979 | DEBUG    | pipecat.transports.base_output:_handle_frame:721 - Bot stopped speaking based on TTSStoppedFrame
+2026-03-24 09:58:34.979 | DEBUG    | pipecat.transports.base_output:_bot_stopped_speaking:655 - Bot stopped speaking
+2026-03-24 09:58:37.881 | DEBUG    | pipecat.services.tts_service:append_to_audio_context:1226 - GeminiTTSService#1 recreating audio context c969a761-6873-4f3f-a76c-aca3b5e1299f
+2026-03-24 09:58:37.882 | DEBUG    | pipecat.transports.base_output:_bot_started_speaking:627 - Bot started speaking
+2026-03-24 09:58:37.933 | DEBUG    | pipecat.services.google.tts:run_tts:1424 - GeminiTTSService#1: Generating TTS [I’m designed to help with all kinds of things—answering questions, explaining concepts, brainstorming ideas, writing, coding, and more.]
+```
+
